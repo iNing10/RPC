@@ -1,0 +1,1 @@
+"""Shared RPC-VAD utilities."""
