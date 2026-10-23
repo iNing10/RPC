@@ -41,6 +41,8 @@ STORE_FALSE_FLAGS = {
     "rpc": {"global_pose_segs"},
 }
 PATH_ARGS = {
+    "prepared-dir",
+    "prepared_dir",
     "checkpoint",
     "data-root",
     "data_dir",

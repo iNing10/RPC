@@ -155,17 +155,19 @@ def diag_mahalanobis_distance(
     variances: torch.Tensor,
     weights: torch.Tensor | None = None,
     chunk_size: int = 4096,
+    device: torch.device | str | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     out_dist = []
     out_assign = []
     h = h.float()
-    centers = centers.float()
-    variances = variances.float().clamp_min(1e-6)
+    device = h.device if device is None else torch.device(device)
+    centers = centers.float().to(device)
+    variances = variances.float().clamp_min(1e-6).to(device)
     for start in range(0, h.shape[0], chunk_size):
-        cur = h[start : start + chunk_size]
+        cur = h[start : start + chunk_size].to(device)
         diff2 = (cur[:, None, :] - centers[None, :, :]).pow(2) / variances[None, :, :]
         if weights is not None:
-            cur_weights = weights[start : start + chunk_size].float().clamp_min(1e-6)
+            cur_weights = weights[start : start + chunk_size].float().clamp_min(1e-6).to(device)
             diff2 = diff2 * cur_weights[:, None, :]
             distances = diff2.sum(dim=2).sqrt()
         else:
@@ -183,6 +185,7 @@ def calibration_distances(
     cfg: CalibrationConfig,
     train_weight: torch.Tensor | None = None,
     test_weight: torch.Tensor | None = None,
+    distance_device: torch.device | str = "cpu",
 ) -> tuple[torch.Tensor, torch.Tensor]:
     weighted = cfg.reliability_mode == "keypoint_weighted"
     if weighted and cfg.pool != "flatten":
@@ -214,8 +217,16 @@ def calibration_distances(
         return train_base_cpu / radius[train_assign_cpu], test_base.cpu() / radius[test_assign.cpu()]
 
     if cfg.distance == "diag_mahalanobis":
-        _euclid_dist, assignments = euclidean_distance(train_h, centers)
-        assignments = assignments.cpu()
+        device = torch.device(distance_device)
+        if device.type == "cpu":
+            _euclid_dist, assignments = euclidean_distance(train_h, centers)
+            assignments = assignments.cpu()
+        else:
+            device_h, device_centers = train_h.float().to(device), centers.float().to(device)
+            assignments = torch.cat([
+                torch.cdist(device_h[start:start + 4096], device_centers).argmin(1).cpu()
+                for start in range(0, len(device_h), 4096)])
+            del device_h, device_centers
         train_h_cpu = train_h.float().cpu()
         centers_cpu = centers.float().cpu()
         global_var = train_h_cpu.var(dim=0, unbiased=False).clamp_min(1e-6)
@@ -224,11 +235,12 @@ def calibration_distances(
             mask = assignments == idx
             variances[idx] = train_h_cpu[mask].var(dim=0, unbiased=False).clamp_min(1e-6) if mask.any() else global_var
         if weighted:
-            train_dist, _ = diag_mahalanobis_distance(train_h_cpu, centers_cpu, variances, _require_weight(train_weight).cpu())
-            test_dist, _ = diag_mahalanobis_distance(test_h.float().cpu(), centers_cpu, variances, _require_weight(test_weight).cpu())
+            train_dist, _ = diag_mahalanobis_distance(train_h_cpu, centers_cpu, variances, _require_weight(train_weight).cpu(), device=device)
+            test_dist, _ = diag_mahalanobis_distance(test_h.float().cpu(), centers_cpu, variances, _require_weight(test_weight).cpu(), device=device)
         else:
-            train_dist, _ = diag_mahalanobis_distance(train_h_cpu, centers_cpu, variances)
-            test_dist, _ = diag_mahalanobis_distance(test_h.float().cpu(), centers_cpu, variances)
+            chunk_size = 4096 if device.type == "cpu" else 512
+            train_dist, _ = diag_mahalanobis_distance(train_h_cpu, centers_cpu, variances, chunk_size=chunk_size, device=device)
+            test_dist, _ = diag_mahalanobis_distance(test_h.float().cpu(), centers_cpu, variances, chunk_size=chunk_size, device=device)
         return train_dist, test_dist
 
     raise ValueError(f"Unsupported distance: {cfg.distance}")

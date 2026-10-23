@@ -5,6 +5,7 @@ from scipy.ndimage import gaussian_filter1d
 from sklearn.metrics import roc_auc_score
 from tqdm import tqdm
 from dataset import shanghaitech_hr_skip
+from common.data import resolve_dataset
 from utils.hr_ubnormal_protocol import (
     apply_hr_ubnormal_eval_mask,
     dataset_root_name as canonical_dataset_root_name,
@@ -41,7 +42,8 @@ def apply_dataset_eval_masks(gt_arr, scores_arr, clip_names, args=None):
 
 def score_dataset(score, metadata, args=None):
     gt_arr, scores_arr, clip_names = get_dataset_scores(score, metadata, args=args)
-    scores_arr = smooth_scores(scores_arr)
+    if resolve_dataset(args.dataset).key != 'msad_hr':
+        scores_arr = smooth_scores(scores_arr)
     gt_arr, scores_arr = apply_dataset_eval_masks(gt_arr, scores_arr, clip_names, args=args)
     if args is not None and getattr(args, "dump_scores_npz", False):
         out_dir = args.dump_scores_dir
@@ -65,6 +67,10 @@ def score_dataset(score, metadata, args=None):
 
 
 def get_dataset_scores(scores, metadata, args=None):
+    if resolve_dataset(args.dataset).key == 'msad_hr':
+        from common.msad import frame_arrays
+        names, labels, values = frame_arrays(scores, args.data_dir, args.prepared_dir, 'stg-nf', args.smooth_sigma)
+        return labels, values, names
     dataset_gt_arr = []
     dataset_scores_arr = []
     dataset_clip_names = []

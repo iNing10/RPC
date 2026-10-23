@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from typing import Dict, Iterator, List, Optional, Sequence, Tuple
+import json
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -18,6 +20,34 @@ from common.data import (
     read_raw_frame_labels,
     video_id_from_pose_path,
 )
+
+
+def load_windows(args, split, return_conf=False):
+    cfg = dataset_config(args.dataset)
+    if cfg.key == "msad_hr":
+        from common.msad import split_arrays
+        window = args.window or (cfg.train_window if split == "train" else cfg.test_window)
+        stride = args.train_stride if split == "train" else args.test_stride
+        windows, confidence = split_arrays(args.data_root, args.prepared_dir, split,
+                                           window=window, stride=stride,
+                                           confidence_threshold=args.train_confidence_threshold,
+                                           max_missing=args.interpolation_gap)
+        prepared = Path(args.prepared_dir) / split
+        rows = json.loads((prepared / "catalog.json").read_text())
+        videos, centers = [np.load(prepared / f"{name}.npy") for name in ("videos", "centers")]
+        names = np.asarray([row["video"] for row in rows], dtype=object)
+        meta = [(name, int(center), "") for name, center in zip(names[videos], centers)]
+        counts = {row["video"]: int(row["num_frames"]) for row in rows}
+        return (windows, confidence, meta, counts) if return_conf else (windows, meta, counts)
+    files = pose_files(args.data_root, cfg, split,
+                       max_files=args.max_train_files if split == "train" else args.max_test_files)
+    return collect_windows(files, window=args.window or (cfg.train_window if split == "train" else cfg.test_window),
+                           stride=args.train_stride if split == "train" else args.test_stride,
+                           num_joints=args.num_joints, vid_res=cfg.vid_res,
+                           missing_tolerance=args.missing_tolerance,
+                           max_samples=args.max_train_samples if split == "train" else None,
+                           seed=args.seed, return_conf=return_conf,
+                           segment_score_threshold=args.segment_score_threshold)
 
 
 def normalize_segment(

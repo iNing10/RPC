@@ -62,7 +62,7 @@ def init_parser(default_data_dir=DEFAULT_DATA_DIR, default_exp_dir=DEFAULT_EXP_D
     parser.add_argument('--vid_path_test', type=str, default=None, help='Path to test vids')
     parser.add_argument('--pose_path_test', type=str, default=None, help='Path to test pose')
     parser.add_argument('--dataset', type=str, default='ShanghaiTech',
-                        choices=['ShanghaiTech', 'ShanghaiTech-HR', 'UBnormal', 'HR-UBnormal', 'UBnormal-HR'],
+                        choices=['ShanghaiTech', 'ShanghaiTech-HR', 'UBnormal', 'HR-UBnormal', 'UBnormal-HR', 'MSAD-HR'],
                         help='Dataset for Eval')
     parser.add_argument('--vid_res', type=str, default=None, help='Video Res')
     parser.add_argument('--device', type=str, default='cuda:0', metavar='DEV', help='Device for feature calculation (default: \'cuda:0\')')
@@ -70,6 +70,13 @@ def init_parser(default_data_dir=DEFAULT_DATA_DIR, default_exp_dir=DEFAULT_EXP_D
     parser.add_argument('--verbose', type=int, default=1, metavar='V', choices=[0, 1], help='Verbosity [1/0] (default: 1)')
     parser.add_argument('--data_dir', type=str, default=default_data_dir, metavar='DATA_DIR', help="Path to directory holding .npy and .pkl files (default: {})".format(default_data_dir))
     parser.add_argument('--exp_dir', type=str, default=default_exp_dir, metavar='EXP_DIR', help="Path to the directory where models will be saved (default: {})".format(default_exp_dir))
+    parser.add_argument('--prepared-dir', '--prepared_dir', default=str(PROJECT_ROOT / 'outputs/msad_hr/prepared'))
+    parser.add_argument('--interpolation-gap', '--interpolation_gap', type=int, default=24)
+    parser.add_argument('--eval_batch_size', type=int, default=None)
+    parser.add_argument('--smooth_sigma', type=int, default=7)
+    parser.add_argument('--output-json', '--output_json', default=None)
+    parser.add_argument('--grad_clip', type=float, default=100.0)
+    parser.add_argument('--num_threads', type=int, default=None)
     parser.add_argument('--num_workers', type=int, default=8, metavar='W', help='number of dataloader workers (0=current thread) (default: 32)')
     parser.add_argument('--plot_vid', type=int, default=0, help='Plot test videos')
     parser.add_argument('--only_test', action='store_true', help='Visualize train/test data')

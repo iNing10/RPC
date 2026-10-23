@@ -23,7 +23,7 @@ from pose_dataset import (
     DEFAULT_DATA_ROOT,
     PoseWindowDataset,
     aggregate_frame_scores,
-    collect_windows,
+    load_windows,
     dataset_config,
     labels_scores_by_video,
     pose_files,
@@ -297,20 +297,7 @@ def evaluate(
 ) -> Dict[str, object]:
     data_root = Path(args.data_root)
     cfg = dataset_config(args.dataset)
-    window = args.window or cfg.test_window
-    files = pose_files(data_root, cfg, "test", max_files=args.max_test_files)
-    print(f"building eval windows: dataset={cfg.name} files={len(files)}", flush=True)
-    windows, meta, frame_counts = collect_windows(
-        files,
-        window=window,
-        stride=args.test_stride,
-        num_joints=args.num_joints,
-        vid_res=cfg.vid_res,
-        missing_tolerance=args.missing_tolerance,
-        max_samples=None,
-        seed=args.seed,
-        segment_score_threshold=args.segment_score_threshold,
-    )
+    windows, meta, frame_counts = load_windows(args, "test")
     if len(windows) == 0:
         raise RuntimeError("No evaluation windows were built.")
     for video_id in list(frame_counts):
@@ -325,12 +312,17 @@ def evaluate(
         scoring_info = {"score_method": "nll"}
     finally:
         model.prior_mean = old_prior_mean
-    frame_normality = aggregate_frame_scores(meta, window_normality, frame_counts, reduce="min")
-    if cfg.key == "hr_ubnormal":
+    if cfg.key == "msad_hr":
+        from common.msad import frame_arrays
+        _video_ids, gt_arr, scores_arr = frame_arrays(window_normality, args.data_root, args.prepared_dir,
+                                                     "daflow", args.smooth_sigma)
+    elif cfg.key == "hr_ubnormal":
+        frame_normality = aggregate_frame_scores(meta, window_normality, frame_counts, reduce="min")
         frame_scores = {video_id: -scores for video_id, scores in frame_normality.items()}
         _video_ids, gt_arr, scores_arr = labels_scores_by_video(data_root, cfg, frame_scores)
         scores_arr = smooth_score_arrays(scores_arr, args.smooth_sigma)
     else:
+        frame_normality = aggregate_frame_scores(meta, window_normality, frame_counts, reduce="min")
         frame_normality = smooth_frame_scores(frame_normality, args.smooth_sigma)
         frame_scores = {video_id: -scores for video_id, scores in frame_normality.items()}
         _video_ids, gt_arr, scores_arr = labels_scores_by_video(data_root, cfg, frame_scores)
@@ -364,7 +356,11 @@ def evaluate(
 
 def run(args: argparse.Namespace) -> Dict[str, object]:
     set_seed(args.seed)
-    torch.backends.cudnn.benchmark = True
+    if args.num_threads is not None:
+        torch.set_num_threads(args.num_threads)
+    torch.backends.cudnn.benchmark = not args.deterministic
+    if args.deterministic:
+        torch.backends.cudnn.deterministic = True
     device = choose_device(args.device)
     data_root = Path(args.data_root)
     cfg = dataset_config(args.dataset)
@@ -404,19 +400,26 @@ def run(args: argparse.Namespace) -> Dict[str, object]:
     else:
         train_files = pose_files(data_root, cfg, "train", max_files=args.max_train_files)
         logger.info(f"building train windows: dataset={cfg.name} files={len(train_files)}")
-        train_dataset = PoseWindowDataset(
-            train_files,
-            window=window,
-            stride=args.train_stride,
-            num_joints=args.num_joints,
-            vid_res=cfg.vid_res,
-            missing_tolerance=args.missing_tolerance,
-            max_samples=args.max_train_samples,
-            seed=args.seed,
-            num_transform=args.num_transform,
-            segment_score_threshold=args.segment_score_threshold,
-            dataset_name=cfg.key,
-        )
+        if cfg.key == "msad_hr":
+            from common.msad import DAFlowDataset, prepared_split
+            prepared = prepared_split(args.data_root, args.prepared_dir, "train", window=window,
+                                      stride=args.train_stride, confidence_threshold=args.train_confidence_threshold,
+                                      max_missing=args.interpolation_gap)
+            train_dataset = DAFlowDataset(prepared, "train", args.num_transform)
+        else:
+            train_dataset = PoseWindowDataset(
+                train_files,
+                window=window,
+                stride=args.train_stride,
+                num_joints=args.num_joints,
+                vid_res=cfg.vid_res,
+                missing_tolerance=args.missing_tolerance,
+                max_samples=args.max_train_samples,
+                seed=args.seed,
+                num_transform=args.num_transform,
+                segment_score_threshold=args.segment_score_threshold,
+                dataset_name=cfg.key,
+            )
         logger.info(f"train windows={len(train_dataset)}")
         metrics["num_train_windows"] = len(train_dataset)
         if args.eval_every_epoch:
@@ -449,6 +452,10 @@ def run(args: argparse.Namespace) -> Dict[str, object]:
         print(f"  Frame AUC: {auc:.6f}")
         print(f"  Frames: {num_frames}")
         print()
+    if args.output_json:
+        output = Path(args.output_json)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(as_jsonable(metrics), indent=2) + "\n")
     return metrics
 
 
@@ -565,6 +572,12 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help="shanghaitech/stc, shanghaitech-hr, ubnormal, or hr-ubnormal",
     )
     parser.add_argument("--data-root", default=str(DEFAULT_DATA_ROOT))
+    parser.add_argument("--prepared-dir", default=str(PROJECT_ROOT / "outputs/msad_hr/prepared"))
+    parser.add_argument("--interpolation-gap", type=int, default=24)
+    parser.add_argument("--train-confidence-threshold", type=float, default=0.0)
+    parser.add_argument("--output-json", default=None)
+    parser.add_argument("--num-threads", type=int, default=None)
+    parser.add_argument("--deterministic", action="store_true")
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
     parser.add_argument("--run-name", default=None)
     parser.add_argument("--checkpoint", default=None, help="Evaluate an existing checkpoint.")

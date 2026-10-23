@@ -1,4 +1,6 @@
 import os
+import json
+from pathlib import Path
 import random
 import numpy as np
 import torch
@@ -18,6 +20,8 @@ from utils.train_utils import calc_num_of_params
 def main(argv=None):
     parser = init_parser()
     args = parser.parse_args(argv)
+    if args.num_threads is not None:
+        torch.set_num_threads(args.num_threads)
 
     if args.seed == 999:  # Record and init seed
         args.seed = torch.initial_seed()
@@ -58,11 +62,16 @@ def main(argv=None):
     if pretrained:
         trainer.load_checkpoint(pretrained)
     else:
-        trainer.train(dataset=dataset)
+        trainer.train(dataset=dataset, clip=args.grad_clip)
         dump_args(args, args.exp_dir)
     
     normality_scores = trainer.test()
     auc, scores = score_dataset(normality_scores, dataset["test"].metadata, args=args)
+    if args.output_json:
+        output = Path(args.output_json)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps({'dataset': args.dataset, 'backbone': 'stg-nf', 'seed': args.seed,
+                                      'checkpoint': pretrained, 'metrics': {'STG-NF': float(auc)}}, indent=2) + '\n')
 
     # Logging and recording results
     print("\nEvaluation complete")

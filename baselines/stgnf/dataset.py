@@ -10,6 +10,7 @@ from common.data import (
     is_ubnormal_family,
     list_pose_json_names,
     make_data_loader,
+    resolve_dataset,
     split_name_from_path,
 )
 from utils.data_utils import normalize_pose
@@ -123,7 +124,8 @@ class PoseSegDataset(BasePoseDataset):
         return self.num_transform * self.num_samples
 
 
-def get_dataset_and_loader(args, trans_list, only_test=False):
+def get_dataset_and_loader(args, trans_list, only_test=False, feature_extraction=False,
+                           ordered_train_features=False):
     dataset_args = {'headless': args.headless, 'scale': args.norm_scale, 'scale_proportional': args.prop_norm_scale,
                     'seg_len': args.seg_len, 'return_indices': True, 'return_metadata': True, "dataset": args.dataset,
                     'train_seg_conf_th': args.train_seg_conf_th, 'specific_clip': args.specific_clip,
@@ -140,16 +142,23 @@ def get_dataset_and_loader(args, trans_list, only_test=False):
         dataset_args['trans_list'] = trans_list[:args.num_transform] if split == 'train' else None
         dataset_args['seg_stride'] = args.seg_stride if split == 'train' else 1  # No strides for test set
         dataset_args['vid_path'] = args.vid_path[split]
-        dataset[split] = PoseSegDataset(args.pose_path[split], path_to_vid_dir=args.vid_path[split],
+        if resolve_dataset(args.dataset).key == 'msad_hr':
+            from common.msad import STGNFDataset, prepared_split
+            prepared = prepared_split(args.data_dir, args.prepared_dir, split,
+                                      window=args.seg_len, stride=args.seg_stride if split == 'train' else 1,
+                                      confidence_threshold=args.train_seg_conf_th, max_missing=args.interpolation_gap)
+            dataset[split] = STGNFDataset(prepared, split, args.num_transform if split == 'train' else 1)
+        else:
+            dataset[split] = PoseSegDataset(args.pose_path[split], path_to_vid_dir=args.vid_path[split],
                                         normalize_pose_segs=normalize_pose_segs,
                                         evaluate=evaluate,
                                         abnormal_train_path=abnormal_train_path,
                                         **dataset_args)
         loader[split] = make_data_loader(
             dataset[split],
-            batch_size=args.batch_size,
+            batch_size=(getattr(args, 'eval_batch_size', None) or args.batch_size) if evaluate or feature_extraction else args.batch_size,
             num_workers=args.num_workers,
-            shuffle=(split == 'train'),
+            shuffle=(split == 'train' and not ordered_train_features),
             seed=split_seed,
             pin_memory=True,
         )

@@ -1,12 +1,13 @@
 # RPC: Reliability-Aware Prototype Calibration for Frozen Pose-Flow Video Anomaly Detection
 
 This repository is the official implementation of RPC for frozen pose-flow video anomaly detection backbones.
-It keeps only the paths needed to train/evaluate the two baselines and run RPC on four datasets:
+It keeps only the paths needed to train/evaluate the two baselines and run RPC on five benchmarks:
 
 - ShanghaiTech
 - ShanghaiTech-HR
 - UBnormal
 - UBnormal-HR
+- MSAD-HR
 
 ## Environment
 
@@ -50,6 +51,8 @@ data/
 | DA-Flow | ShanghaiTech-HR | `configs/daflow/shanghaitech_hr.json` | `configs/rpc/daflow_shanghaitech_hr.json` |
 | DA-Flow | UBnormal | `configs/daflow/ubnormal.json` | `configs/rpc/daflow_ubnormal.json` |
 | DA-Flow | UBnormal-HR | `configs/daflow/ubnormal_hr.json` | `configs/rpc/daflow_ubnormal_hr.json` |
+| STG-NF | MSAD-HR | `configs/stgnf/msad_hr.json` | `configs/rpc/stgnf_msad_hr.json` |
+| DA-Flow | MSAD-HR | `configs/daflow/msad_hr.json` | `configs/rpc/daflow_msad_hr.json` |
 
 ## Test Baseline Checkpoints
 

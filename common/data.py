@@ -37,6 +37,7 @@ class DatasetSpec:
 
 
 DATASET_SPECS = {
+    "msad_hr": DatasetSpec("msad_hr", "MSAD", "MSAD-HR", "msad-hr", 24, 24, (0, 0)),
     "shanghaitech": DatasetSpec("shanghaitech", "ShanghaiTech", "ShanghaiTech", "shanghaitech", 24, 24, (856, 480)),
     "shanghaitech_hr": DatasetSpec(
         "shanghaitech_hr", "ShanghaiTech", "ShanghaiTech-HR", "shanghaitech-hr", 24, 24, (856, 480)
@@ -46,6 +47,8 @@ DATASET_SPECS = {
 }
 
 ALIASES = {
+    "msad-hr": "msad_hr",
+    "msad_hr": "msad_hr",
     "shanghaitech": "shanghaitech",
     "stc": "shanghaitech",
     "shanghaitech-hr": "shanghaitech_hr",
@@ -98,6 +101,8 @@ def dataset_root(data_root: str | Path, dataset: str | DatasetSpec) -> Path:
 
 
 def pose_dir(data_root: str | Path, dataset: str | DatasetSpec, split: str) -> Path:
+    if resolve_dataset(dataset).key == "msad_hr":
+        return dataset_root(data_root, dataset) / "pose"
     return dataset_root(data_root, dataset) / "pose" / split
 
 
@@ -334,7 +339,12 @@ def pose_files(
     split: str,
     max_files: Optional[int] = None,
 ) -> List[Path]:
-    files = sorted(pose_dir(data_root, dataset, split).glob("*_alphapose_tracked_person.json"))
+    if resolve_dataset(dataset).key == "msad_hr":
+        root = dataset_root(data_root, dataset)
+        with (root / "MSAD_evaluation_tools" / f"{split}_videos.csv").open(newline="") as handle:
+            files = [root / "pose" / row["pose_relative_path"] for row in csv.DictReader(handle)]
+    else:
+        files = sorted(pose_dir(data_root, dataset, split).glob("*_alphapose_tracked_person.json"))
     files = filter_pose_files_for_protocol(files, dataset, data_root, split)
     if max_files is not None:
         files = files[:max_files]
@@ -414,7 +424,9 @@ def load_tracks(path: str | Path, num_joints: int = 18) -> Tuple[List[Dict[str, 
 def read_raw_frame_labels(data_root: str | Path, dataset: str | DatasetSpec, video_id: str) -> np.ndarray:
     spec = resolve_dataset(dataset)
     root = dataset_root(data_root, spec)
-    if spec.key in ("shanghaitech", "shanghaitech_hr"):
+    if spec.key == "msad_hr":
+        labels = np.load(root / "MSAD_evaluation_tools" / "gt" / f"{video_id}.npy")
+    elif spec.key in ("shanghaitech", "shanghaitech_hr"):
         path = root / "gt" / "test_frame_mask" / f"{video_id}.npy"
         labels = np.load(path).astype(np.float32)
         labels = (labels > 0.5).astype(np.uint8)

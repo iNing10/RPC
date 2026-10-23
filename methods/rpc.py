@@ -29,12 +29,11 @@ from args import init_parser, init_sub_args  # noqa: E402
 from common.data import (  # noqa: E402
     aggregate_frame_scores,
     labels_scores_by_video,
-    pose_files,
     resolve_dataset,
 )
 from dataset import get_dataset_and_loader  # noqa: E402
 from models.STG_NF.model_pose import STG_NF  # noqa: E402
-from pose_dataset import collect_windows, dataset_config, read_raw_frame_labels  # noqa: E402
+from pose_dataset import dataset_config, load_windows, read_raw_frame_labels  # noqa: E402
 from run_experiment import (  # noqa: E402
     choose_device as choose_daflow_device,
     load_checkpoint as load_daflow_checkpoint,
@@ -69,6 +68,8 @@ def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     parser = build_parser(argv)
     args = parser.parse_args(argv)
+    if getattr(args, "num_threads", None) is not None:
+        torch.set_num_threads(args.num_threads)
     if args.checkpoint is None:
         parser.error("--checkpoint is required")
 
@@ -101,7 +102,8 @@ def build_parser(argv: list[str]) -> argparse.ArgumentParser:
 def add_rpc_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--backbone", default="stg-nf", choices=sorted(BACKBONE_NAMES))
     parser.add_argument("--calibration", default="rpc", choices=["r", "pc", "rpc", "all"])
-    parser.add_argument("--output-json", "--output_json", default=None)
+    if "--output-json" not in parser._option_string_actions:
+        parser.add_argument("--output-json", "--output_json", default=None)
 
     parser.add_argument("--rpc-pool", "--rpc_pool", default=None, choices=["flatten", "mean", "mean_std", "rms"])
     parser.add_argument("--rpc-pc-pool", "--rpc_pc_pool", default=None, choices=["flatten", "mean", "mean_std", "rms"])
@@ -118,12 +120,20 @@ def add_rpc_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--rpc-kmeans-iters", "--rpc_kmeans_iters", type=int, default=30)
     parser.add_argument("--rpc-kmeans-sample-size", "--rpc_kmeans_sample_size", type=int, default=50000)
     parser.add_argument("--rpc-kmeans-seed", "--rpc_kmeans_seed", type=int, default=None)
+    parser.add_argument("--rpc-distance-device", default="cpu")
+    parser.add_argument("--rpc-reliability-device", default=None)
+    parser.add_argument("--rpc-normalization-device", default=None)
+    parser.add_argument("--rpc-ordered-train-features", action="store_true")
 
 
 def build_daflow_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="DA-Flow RPC")
     parser.add_argument("--dataset", default="shanghaitech")
     parser.add_argument("--data-root", "--data_root", default=str(ROOT / "data"))
+    parser.add_argument("--prepared-dir", default=str(ROOT / "outputs/msad_hr/prepared"))
+    parser.add_argument("--interpolation-gap", type=int, default=24)
+    parser.add_argument("--train-confidence-threshold", type=float, default=0.0)
+    parser.add_argument("--num-threads", type=int, default=None)
     parser.add_argument("--checkpoint", default=None)
     parser.add_argument("--no-eval", action="store_true")
 
@@ -213,7 +223,9 @@ def load_backbone_context(args: argparse.Namespace, pools: list[str]) -> dict[st
 
 def load_stgnf_context(args: argparse.Namespace, pools: list[str]) -> dict[str, Any]:
     args, _model_args = init_sub_args(args)
-    dataset, loader = get_dataset_and_loader(args, trans_list=trans_list, only_test=False)
+    dataset, loader = get_dataset_and_loader(
+        args, trans_list=trans_list, only_test=False, feature_extraction=True,
+        ordered_train_features=args.rpc_ordered_train_features)
     model = build_stgnf_model(args, dataset)
     load_stgnf_checkpoint(model, args.checkpoint, args.device)
     model.to(args.device)
@@ -244,35 +256,9 @@ def load_daflow_context(args: argparse.Namespace, pools: list[str]) -> dict[str,
     model = make_daflow_model(args).to(device)
     load_daflow_checkpoint(model, args.checkpoint, device)
     model.eval()
-    train_window = args.window or cfg.train_window
-    test_window = args.window or cfg.test_window
-    train_files = pose_files(args.data_root, cfg, "train", max_files=args.max_train_files)
-    test_files = pose_files(args.data_root, cfg, "test", max_files=args.max_test_files)
-    train_windows, train_conf, _train_meta, _train_counts = collect_windows(
-        train_files,
-        window=train_window,
-        stride=args.train_stride,
-        num_joints=args.num_joints,
-        vid_res=cfg.vid_res,
-        missing_tolerance=args.missing_tolerance,
-        max_samples=args.max_train_samples,
-        seed=args.seed,
-        return_conf=True,
-        segment_score_threshold=args.segment_score_threshold,
-    )
+    train_windows, train_conf, _train_meta, _train_counts = load_windows(args, "train", return_conf=True)
     train_windows, train_conf = apply_daflow_train_transforms(train_windows, train_conf, args.num_transform)
-    test_windows, test_conf, test_meta, test_counts = collect_windows(
-        test_files,
-        window=test_window,
-        stride=args.test_stride,
-        num_joints=args.num_joints,
-        vid_res=cfg.vid_res,
-        missing_tolerance=args.missing_tolerance,
-        max_samples=None,
-        seed=args.seed,
-        return_conf=True,
-        segment_score_threshold=args.segment_score_threshold,
-    )
+    test_windows, test_conf, test_meta, test_counts = load_windows(args, "test", return_conf=True)
     if len(train_windows) == 0:
         raise RuntimeError("No DA-Flow train windows were built.")
     if len(test_windows) == 0:
@@ -371,7 +357,7 @@ def extract_stgnf_tensors(
     keep_inputs: bool = True,
 ) -> dict[str, Any]:
     parts = empty_cache_parts(pools)
-    batch_size = int(getattr(args, "batch_size", 256))
+    batch_size = int(getattr(args, "eval_batch_size", None) or getattr(args, "batch_size", 256))
     for start in range(0, full_pose.shape[0], batch_size):
         pose = full_pose[start : start + batch_size].to(args.device, non_blocking=True).float()
         score = score_seq[start : start + batch_size].to(args.device, non_blocking=True).float()
@@ -380,7 +366,10 @@ def extract_stgnf_tensors(
         z, nll, _aux = model(x=flow_input, label=label, return_latent=True)
         if args.model_confidence:
             nll = nll * score.amin(dim=-1)
-        segment_reliability, flat_reliability = get_keypoint_reliability(pose, z)
+        reliability_pose = pose.to(args.rpc_reliability_device) if args.rpc_reliability_device is not None else pose
+        segment_reliability, flat_reliability = get_keypoint_reliability(reliability_pose, z)
+        if not keep_inputs and args.rpc_reliability_mode != "keypoint_weighted":
+            flat_reliability = flat_reliability.new_empty((len(flat_reliability), 0))
         append_cache_parts(parts, nll, segment_reliability, flat_reliability, z, pools)
     cache = finalize_cache_parts(parts)
     if keep_inputs:
@@ -407,6 +396,8 @@ def extract_daflow_tensors(
         for start in range(0, windows.shape[0], args.eval_batch_size):
             batch = windows[start : start + args.eval_batch_size].to(device).float()
             conf = confidence[start : start + args.eval_batch_size].to(device).float()
+            if args.rpc_reliability_device is not None:
+                conf = conf.to(args.rpc_reliability_device)
             z, log_prob = model.latent_log_prob(batch)
             nll = -log_prob
             if args.bits_per_dim:
@@ -414,6 +405,8 @@ def extract_daflow_tensors(
                 nll = nll / (np.log(2.0) * channels * frames * joints)
             segment_reliability = conf.clamp(0.0, 1.0).mean(dim=(1, 2))
             flat_reliability = conf.unsqueeze(1).expand(-1, z.shape[1], -1, -1).flatten(start_dim=1)
+            if not keep_inputs and args.rpc_reliability_mode != "keypoint_weighted":
+                flat_reliability = flat_reliability.new_empty((len(flat_reliability), 0))
             append_cache_parts(parts, nll, segment_reliability, flat_reliability, z, pools)
     finally:
         model.prior_mean = old_prior_mean
@@ -509,9 +502,11 @@ def calibration_scores(
     if cfg.reliability_mode == "keypoint_weighted":
         train_weight = reliability_gate(train_cache["flat_reliability"], cfg)
         eval_weight = reliability_gate(eval_cache["flat_reliability"], cfg)
-    train_dist, eval_dist = calibration_distances(train_h, eval_h, centers, cfg, train_weight, eval_weight)
-    nll_z = zscore(eval_cache["nll"].to(runtime_device(args)), compute_stats(train_cache["nll"], cfg.norm)).detach().cpu()
-    dist_z = zscore(eval_dist.to(runtime_device(args)), compute_stats(train_dist, cfg.norm)).detach().cpu()
+    train_dist, eval_dist = calibration_distances(train_h, eval_h, centers, cfg, train_weight, eval_weight,
+                                                 distance_device=getattr(args, "rpc_distance_device", "cpu"))
+    normalization_device = args.rpc_normalization_device or runtime_device(args)
+    nll_z = zscore(eval_cache["nll"].to(normalization_device), compute_stats(train_cache["nll"], cfg.norm)).detach().cpu()
+    dist_z = zscore(eval_dist.to(normalization_device), compute_stats(train_dist, cfg.norm)).detach().cpu()
     return fused_normality(nll_z, dist_z, eval_cache["segment_reliability"], cfg)
 
 
@@ -522,6 +517,10 @@ def effective_kmeans_seed(args: argparse.Namespace, cfg: CalibrationConfig) -> i
 
 
 def auc_stgnf_from_normality(normality: np.ndarray, metadata: Any, args: argparse.Namespace) -> float:
+    if resolve_dataset(args.dataset).key == "msad_hr":
+        from common.msad import frame_arrays
+        _names, labels, scores = frame_arrays(normality, args.data_dir, args.prepared_dir, "stg-nf", args.smooth_sigma)
+        return safe_auc(np.concatenate(labels), np.concatenate(scores))
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
         gt_arr, scores_arr, clip_names = get_dataset_scores(normality, metadata, args=args)
         scores_arr = smooth_scores(scores_arr)
@@ -537,6 +536,10 @@ def auc_daflow_from_normality(
     frame_counts: dict[str, int],
     args: argparse.Namespace,
 ) -> float:
+    if resolve_dataset(args.dataset).key == "msad_hr":
+        from common.msad import frame_arrays
+        _names, labels, scores = frame_arrays(normality, args.data_root, args.prepared_dir, "daflow", args.smooth_sigma)
+        return safe_auc(np.concatenate(labels), np.concatenate(scores))
     frame_normality = aggregate_frame_scores(meta, normality, frame_counts, reduce="min")
     if resolve_dataset(args.dataset).key == "hr_ubnormal":
         frame_anomaly_scores = {video_id: -scores for video_id, scores in frame_normality.items()}
